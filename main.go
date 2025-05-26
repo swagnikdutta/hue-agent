@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -14,45 +16,46 @@ import (
 
 const lightId = "LIGHT_ID"
 
-type HueAgent struct {
-	Wg   *sync.WaitGroup
-	home *openhue.Home
-}
+func (agent *HueAgent) updateBulbState(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var body LightStateRequest
 
-func (agent *HueAgent) calendarBulbHandler(w http.ResponseWriter, r *http.Request) {
-	bulbState := r.PathValue("state")
-	if bulbState != "on" && bulbState != "off" {
-		errMsg := fmt.Sprintf("Invalid value %q for bulb state. Allowed values: 'on', 'off'\n", bulbState)
-		http.Error(w, errMsg, http.StatusBadRequest)
+	bodyBytes, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		resp := prepareHTTPResponse(http.StatusInternalServerError, "Failed to read request body", nil)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(resp)
 		return
 	}
 
-	lightsMap, _ := agent.home.GetLights()
 	var myLight openhue.LightGet
+	lightsMap, _ := agent.home.GetLights()
 	for k, v := range lightsMap {
 		if k == os.Getenv(lightId) {
 			myLight = v
 		}
 	}
 
-	// light variables
-	mirekValue := 153
-	brightness := float32(100.0)
-	on := false
-	if bulbState == "on" {
-		on = true
+	// hard-coding these values as I'm not sure if random user-input values for these attributes are safe for the bulb
+	body.Mirek = 153
+	body.Brightness = float32(100.0)
+
+	if err := agent.home.UpdateLight(*myLight.Id, openhue.LightPut{
+		On: &openhue.On{On: &body.On},
+		ColorTemperature: &openhue.ColorTemperature{
+			Mirek: &body.Mirek,
+		},
+		Dimming: &openhue.Dimming{Brightness: &body.Brightness},
+	}); err != nil {
+		resp := prepareHTTPResponse(http.StatusInternalServerError, fmt.Sprintf("Failed to update light state. Error: %s", err), nil)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(resp)
+		return
 	}
 
-	err := agent.home.UpdateLight(*myLight.Id, openhue.LightPut{
-		On: &openhue.On{On: &on},
-		ColorTemperature: &openhue.ColorTemperature{
-			Mirek: &mirekValue,
-		},
-		Dimming: &openhue.Dimming{Brightness: &brightness},
-	})
-	if err != nil {
-		fmt.Printf("Error updating light: %v\n", err)
-	}
+	resp := prepareHTTPResponse(http.StatusOK, "Successfully updated light state", nil)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
 }
 
 func NewHueAgent() *HueAgent {
@@ -68,7 +71,7 @@ func NewHueAgent() *HueAgent {
 
 func NewRequestMultiplexer(agent *HueAgent) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar/{state}", agent.calendarBulbHandler)
+	mux.HandleFunc("/light/state", agent.updateBulbState)
 	return mux
 }
 
@@ -101,7 +104,6 @@ func main() {
 	}
 
 	agent := NewHueAgent()
-
 	httpServer := createHTTPServer(agent)
 	startHTTPServer(httpServer, agent)
 	agent.Wg.Wait()
