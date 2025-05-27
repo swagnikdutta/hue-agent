@@ -29,7 +29,13 @@ func (agent *HueAgent) updateBulbState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var myLight openhue.LightGet
-	lightsMap, _ := agent.home.GetLights()
+	lightsMap, err := agent.home.GetLights()
+	if err != nil {
+		// this happened during a power cut
+		log.Printf("Error occurred while getting lights: %s\n", err)
+		return
+	}
+
 	for k, v := range lightsMap {
 		if k == os.Getenv(lightId) {
 			myLight = v
@@ -54,6 +60,7 @@ func (agent *HueAgent) updateBulbState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := prepareHTTPResponse(http.StatusOK, "Successfully updated light state", nil)
+	log.Println("Successfully updated light state")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
 }
