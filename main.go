@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -14,15 +14,20 @@ import (
 	"github.com/openhue/openhue-go"
 )
 
-const lightId = "LIGHT_ID"
+type contextKey string
+
+const (
+	lightId string = "LIGHT_ID"
+
+	lightStatePayloadKey contextKey = "lightStatePayload"
+)
 
 func (agent *HueAgent) updateBulbState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	var body LightStateRequest
 
-	bodyBytes, _ := io.ReadAll(r.Body)
-	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		resp := prepareHTTPResponse(http.StatusInternalServerError, "Failed to read request body", nil)
+	body, ok := r.Context().Value(lightStatePayloadKey).(LightStateRequest)
+	if !ok {
+		resp := prepareHTTPResponse(http.StatusInternalServerError, "Missing validation payload in context", nil)
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write(resp)
 		return
@@ -41,10 +46,6 @@ func (agent *HueAgent) updateBulbState(w http.ResponseWriter, r *http.Request) {
 			myLight = v
 		}
 	}
-
-	// hard-coding these values as I'm not sure if random user-input values for these attributes are safe for the bulb
-	body.Mirek = 153
-	body.Brightness = float32(100.0)
 
 	if err := agent.home.UpdateLight(*myLight.Id, openhue.LightPut{
 		On: &openhue.On{On: &body.On},
@@ -76,9 +77,42 @@ func NewHueAgent() *HueAgent {
 	}
 }
 
+func validationMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var payload LightStateRequest
+
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			resp := prepareHTTPResponse(http.StatusBadRequest, "Invalid JSON payload", nil)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(resp)
+			return
+		}
+
+		if payload.Mirek < 153 || payload.Mirek > 370 {
+			resp := prepareHTTPResponse(http.StatusBadRequest, "Invalid mirek value", nil)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(resp)
+			return
+		}
+
+		if payload.Brightness < 0 || payload.Brightness > 100 {
+			resp := prepareHTTPResponse(http.StatusBadRequest, "Invalid brightness value", nil)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(resp)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), lightStatePayloadKey, payload)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 func NewRequestMultiplexer(agent *HueAgent) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/light/state", agent.updateBulbState)
+	mux.HandleFunc("/light/state", validationMiddleware(agent.updateBulbState))
 	return mux
 }
 
